@@ -44,7 +44,7 @@
       flex-shrink: 0;
     }
 
-    #status-bar .live-badge {
+    .live-badge {
       display: flex;
       align-items: center;
       gap: 6px;
@@ -55,7 +55,7 @@
       letter-spacing: 1px;
     }
 
-    #status-bar .live-badge .dot {
+    .live-badge .dot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
@@ -86,7 +86,7 @@
       pointer-events: none;
     }
 
-    #overlay-loading .spinner {
+    .spinner {
       width: 40px;
       height: 40px;
       border: 3px solid #333;
@@ -95,14 +95,9 @@
       animation: spin 0.8s linear infinite;
     }
 
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
-    #overlay-loading p {
-      font-size: 14px;
-      color: #888;
-    }
+    #overlay-loading p { font-size: 14px; color: #888; }
 
     #error-msg {
       display: none;
@@ -117,20 +112,9 @@
       padding: 32px;
     }
 
-    #error-msg.visible {
-      display: flex;
-    }
-
-    #error-msg h2 {
-      font-size: 20px;
-      color: #fff;
-    }
-
-    #error-msg p {
-      font-size: 14px;
-      color: #888;
-      max-width: 400px;
-    }
+    #error-msg.visible { display: flex; }
+    #error-msg h2 { font-size: 20px; color: #fff; }
+    #error-msg p  { font-size: 14px; color: #888; max-width: 400px; }
 
     #error-msg button {
       margin-top: 8px;
@@ -149,13 +133,13 @@
 
   <div id="overlay-loading">
     <div class="spinner"></div>
-    <p>Buscando transmissão ao vivo…</p>
+    <p id="loading-text">Buscando transmissão ao vivo…</p>
   </div>
 
   <div id="error-msg">
     <h2>Nenhuma live encontrada</h2>
-    <p>A CazéTV não está transmitindo nenhum jogo agora. Tente novamente quando houver uma partida ao vivo.</p>
-    <button onclick="init()">Tentar novamente</button>
+    <p>A CazéTV não está transmitindo nenhum jogo agora.<br>A página vai verificar automaticamente.</p>
+    <button onclick="init()">Verificar agora</button>
   </div>
 
   <div id="player-wrapper"></div>
@@ -171,53 +155,66 @@
 
   <script>
     // ── Configurações ──────────────────────────────────────────────
-    const CHANNEL_ID   = 'UCkMoF1FvSbrO21X03Vt9UeA'; // CazéTV
-    const REFRESH_MIN  = 10; // minutos entre re-buscas automáticas
+    const CHANNEL_ID  = 'UCZiYbVptd3PVPf4f6eR6UaQ'; // CazéTV (ID correto)
+    const REFRESH_MIN = 10; // minutos entre re-buscas
     // ──────────────────────────────────────────────────────────────
 
-    const CORS_PROXY   = 'https://corsproxy.io/?';
-    const RSS_URL      = `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`;
+    // Proxies CORS em ordem de preferência — tenta o próximo se falhar
+    const PROXIES = [
+      url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+      url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+      url => `https://cors-anywhere.herokuapp.com/${url}`,
+    ];
 
-    let refreshTimer   = null;
+    const RSS_URL = `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`;
+
     let countdownTimer = null;
     let secondsLeft    = REFRESH_MIN * 60;
 
-    async function fetchLiveVideoId() {
-      try {
-        const res  = await fetch(CORS_PROXY + encodeURIComponent(RSS_URL));
-        const text = await res.text();
-        const doc  = new DOMParser().parseFromString(text, 'application/xml');
-        const entries = doc.querySelectorAll('entry');
-
-        for (const entry of entries) {
-          const videoId = entry.querySelector('videoId')?.textContent?.trim();
-          const title   = entry.querySelector('title')  ?.textContent?.trim() || '';
-          if (!videoId) continue;
-
-          // Verifica se o vídeo está realmente ao vivo via oembed
-          try {
-            const oembed = await fetch(
-              `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
-            );
-            if (!oembed.ok) continue;
-            const data = await oembed.json();
-            // oembed retorna thumbnail específica para lives
-            if (data.thumbnail_url && data.thumbnail_url.includes('hqdefault_live')) {
-              return { videoId, title };
-            }
-          } catch (_) { continue; }
-        }
-        return null;
-      } catch (err) {
-        console.error('Erro ao buscar RSS:', err);
-        return null;
+    async function fetchWithProxy(url) {
+      for (const makeProxy of PROXIES) {
+        try {
+          const res = await fetch(makeProxy(url), { signal: AbortSignal.timeout(8000) });
+          if (res.ok) return await res.text();
+        } catch (_) { /* tenta próximo */ }
       }
+      return null;
+    }
+
+    async function fetchLiveVideoId() {
+      const text = await fetchWithProxy(RSS_URL);
+      if (!text) return null;
+
+      const doc     = new DOMParser().parseFromString(text, 'application/xml');
+      const entries = doc.querySelectorAll('entry');
+
+      for (const entry of entries) {
+        // namespace yt: para videoId
+        const videoIdEl = entry.getElementsByTagNameNS('http://www.youtube.com/xml/schemas/2015', 'videoId')[0]
+                       || entry.querySelector('videoId');
+        const videoId   = videoIdEl?.textContent?.trim();
+        const title     = entry.querySelector('title')?.textContent?.trim() || '';
+        if (!videoId) continue;
+
+        // Verifica se está ao vivo via oEmbed (thumbnail _live = live ativo)
+        try {
+          const oRes = await fetch(
+            `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+            { signal: AbortSignal.timeout(5000) }
+          );
+          if (!oRes.ok) continue;
+          const data = await oRes.json();
+          if (data.thumbnail_url?.includes('hqdefault_live')) {
+            return { videoId, title };
+          }
+        } catch (_) { continue; }
+      }
+      return null;
     }
 
     function renderPlayer(videoId) {
-      const origin  = encodeURIComponent(location.origin || 'https://localhost');
-      const wrapper = document.getElementById('player-wrapper');
-      wrapper.innerHTML = `
+      const origin  = encodeURIComponent(location.origin);
+      document.getElementById('player-wrapper').innerHTML = `
         <iframe
           src="https://www.youtube.com/embed/${videoId}?autoplay=1&mute=0&controls=1&rel=0&modestbranding=1&origin=${origin}"
           allow="autoplay; fullscreen"
@@ -236,22 +233,20 @@
 
     function startCountdown() {
       clearInterval(countdownTimer);
-      secondsLeft = REFRESH_MIN * 60;
+      secondsLeft    = REFRESH_MIN * 60;
       countdownTimer = setInterval(() => {
         secondsLeft--;
         const m = String(Math.floor(secondsLeft / 60)).padStart(2, '0');
         const s = String(secondsLeft % 60).padStart(2, '0');
         document.getElementById('next-refresh').textContent = `Próxima verificação: ${m}:${s}`;
-        if (secondsLeft <= 0) {
-          clearInterval(countdownTimer);
-          init();
-        }
+        if (secondsLeft <= 0) { clearInterval(countdownTimer); init(); }
       }, 1000);
     }
 
     async function init() {
       hideError();
       document.getElementById('overlay-loading').classList.remove('hidden');
+      document.getElementById('loading-text').textContent = 'Buscando transmissão ao vivo…';
 
       const result = await fetchLiveVideoId();
 
